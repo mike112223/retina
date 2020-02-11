@@ -1,32 +1,32 @@
 # Design
 
 RetinaNet
-- <configs>
-- <tools>
+- **configs**
+- **tools**
 	- trainval
 	- test
 	- infer
-- <retina>
-	- <assemble>
-	- <data>
-		- <datasets>
-			- <transforms>
+- **retina**
+	- **assemble**
+	- **data**
+		- **datasets**
+			- **transforms**
 				- transform
 			- base
 			- voc
-		- <dataloaders>
-	- <models>
-		- <backbones>
+		- **dataloaders**
+	- **models**
+		- **backbones**
 			- ResNet
-		- <necks>
+		- **necks**
 			- FPN
-		- <heads>
+		- **heads**
 			- RetinaHead
 				- cls
 				- reg
-		- <anchors>
-			- <generate>
-			- <assigner>
+		- **anchors**
+			- **generate**
+			- **assigner**
 			- anchor
 		- retina
 			- build_backbone
@@ -34,18 +34,18 @@ RetinaNet
 			- build_head
 			- forward(img, img_meta, gt_bboxes, gt_lables)
 				- backbone, neck, head(img)
-	- <optim>
-		- <optimizer>
-		- <lr_scheduler>
-	- <criteria>
+	- **optim**
+		- **optimizer**
+		- **lr_scheduler**
+	- **criteria**
 		- losses
-	- <runner>
+	- **runner**
 		- runner
 			- train
 			- val
 			- test
-	- <tests>
-	- <utils>
+	- **tests**
+	- **utils**
 		- registry
 - requirements
 - README
