@@ -1,0 +1,9 @@
+data/*
+
+sftp-config.json
+
+tests/test_imgs/*
+
+workdir
+
+*meeting.md
