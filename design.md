@@ -39,6 +39,7 @@ RetinaNet
 		- **lr_scheduler**
 	- **criteria**
 		- losses
+	- **evaluation**
 	- **runner**
 		- runner
 			- train

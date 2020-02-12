@@ -112,9 +112,9 @@ class RandomFlip(object):
     def _flip_img(self, results):
         img = results['img']
         if self.direction == 'horizontal':
-            return np.flip(img, axis=1)
+            results['img'] = np.flip(img, axis=1)
         else:
-            return np.flip(img, axis=0)
+            results['img'] = np.flip(img, axis=0)
 
     def _flip_bboxes(self, results):
         h, w = results['img_shape'][:2]
@@ -128,7 +128,7 @@ class RandomFlip(object):
             else:
                 flipped[..., 1::4] = h - bboxes[..., 3::4] - 1
                 flipped[..., 3::4] = h - bboxes[..., 1::4] - 1
-            return flipped
+            results[key] = flipped
 
     def __call__(self, results):
         if np.random.random() < self.flip_ratio:

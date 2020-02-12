@@ -9,7 +9,8 @@ from .samplers import build_sampler
 from .anchor_generator import AnchorGenerator
 from .registry import ANCHORS
 
-from retina.model.utils import bbox2delta, multi_apply, unmap
+from retina.model.utils import (bbox2delta, delta2bbox, multi_apply,
+                                unmap, multiclass_nms)
 
 
 @ANCHORS.register_module
@@ -17,10 +18,6 @@ class Anchor(object):
     """Anchor-based head (RPN, RetinaNet, SSD, etc.).
 
     Args:
-        num_classes (int): Number of categories including the background
-            category.
-        in_channels (int): Number of channels in the input feature map.
-        feat_channels (int): Number of hidden channels. Used in child classes.
         anchor_scales (Iterable): Anchor scales.
         anchor_ratios (Iterable): Anchor aspect ratios.
         anchor_strides (Iterable): Anchor strides.
@@ -42,7 +39,8 @@ class Anchor(object):
                  target_stds=(1.0, 1.0, 1.0, 1.0),
                  allowed_border=0,
                  assigner=None,
-                 sampler=None):
+                 sampler=None,
+                 test_cfg=None):
         super(Anchor, self).__init__()
         if anchor_scales is None:
             octave_scales = np.array(
@@ -67,6 +65,8 @@ class Anchor(object):
 
         self.assigner = build_assigner(assigner)
         self.sampler = build_sampler(sampler)
+
+        self.test_cfg = test_cfg
 
     def get_anchors(self, featmap_sizes, img_metas, device='cuda'):
         """Get anchors according to feature map sizes.
@@ -156,7 +156,6 @@ class Anchor(object):
         return (labels_list, label_weights_list, bbox_targets_list,
                 bbox_weights_list, num_total_pos, num_total_neg)
 
-
     def get_targets_single(self,
                            flat_anchors,
                            valid_flags,
@@ -214,7 +213,6 @@ class Anchor(object):
         return (labels, label_weights, bbox_targets, bbox_weights, pos_inds,
                 neg_inds)
 
-
     def anchor_inside_flags(self,
                             flat_anchors,
                             valid_flags,
@@ -229,6 +227,79 @@ class Anchor(object):
         else:
             inside_flags = valid_flags
         return inside_flags
+
+    def get_bboxes(self, 
+                   anchor_lists,
+                   valid_flag_lists,
+                   img_metas,
+                   cls_scores,
+                   bbox_preds,
+                   num_classes,
+                   rescale=False):
+        num_levels = len(cls_scores)
+
+        result_list = []
+        for img_id in range(len(img_metas)):
+            cls_score_list = [
+                cls_scores[i][img_id].detach() for i in range(num_levels)
+            ]
+            bbox_pred_list = [
+                bbox_preds[i][img_id].detach() for i in range(num_levels)
+            ]
+            img_shape = img_metas[img_id]['img_shape']
+            scale_factor = img_metas[img_id]['scale_factor']
+            proposals = self.get_bboxes_single(cls_score_list, bbox_pred_list,
+                                               anchor_lists[img_id], img_shape,
+                                               scale_factor, num_classes)
+            result_list.append(proposals)
+
+        return result_list
+
+    def get_bboxes_single(self,
+                          cls_score_list,
+                          bbox_pred_list,
+                          mlvl_anchors,
+                          img_shape,
+                          scale_factor,
+                          num_classes,
+                          rescale=False):
+        mlvl_bboxes = []
+        mlvl_scores = []
+
+        for cls_score, bbox_pred, anchors in zip(cls_score_list,
+                                                 bbox_pred_list, mlvl_anchors):
+            cls_score = cls_score.permute(1, 2, 0).reshape(-1, num_classes)
+            scores = cls_score.sigmoid()
+
+            bbox_pred = bbox_pred.permute(1, 2, 0).reshape(-1, 4)
+            nms_pre = self.test_cfg.get('nms_pre', -1)
+
+            if nms_pre > 0 and scores.shape[0] > nms_pre:
+                max_scores, _ = scores.max(dim=1)
+                _, topk_inds = max_scores.topk(nms_pre)
+
+                anchors = anchors[topk_inds, :]
+                bbox_pred = bbox_pred[topk_inds, :]
+                scores = scores[topk_inds, :]
+
+            bboxes = delta2bbox(anchors, bbox_pred, self.target_means,
+                                self.target_stds, img_shape)
+            mlvl_bboxes.append(bboxes)
+            mlvl_scores.append(scores)
+        mlvl_bboxes = torch.cat(mlvl_bboxes)
+        if rescale:
+            mlvl_bboxes /= mlvl_bboxes.new_tensor(scale_factor)
+        mlvl_scores = torch.cat(mlvl_scores)
+
+        # Add a dummy background class to the front when using sigmoid
+        padding = mlvl_scores.new_zeros(mlvl_scores.shape[0], 1)
+        mlvl_scores = torch.cat([padding, mlvl_scores], dim=1)
+
+        det_bboxes, det_labels = multiclass_nms(mlvl_bboxes, mlvl_scores,
+                                                self.test_cfg.score_thr, self.test_cfg.nms,
+                                                self.test_cfg.max_per_img)
+
+        return det_bboxes, det_labels
 
 
 def images_to_levels(target, num_level_anchors):

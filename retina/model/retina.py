@@ -1,12 +1,12 @@
 import torch.nn as nn
 
-# from mmdet.core import bbox2result
 from .registry import DETECTORS
 
 from retina.model.backbones import build_backbone
 from retina.model.necks import build_neck
 from retina.model.heads import build_head
 from retina.model.anchors import build_anchor
+from retina.model.utils import bbox2result
 
 
 @DETECTORS.register_module
@@ -88,50 +88,42 @@ class RetinaNet(nn.Module):
             gt_labels
         )
 
-
         pred_results = (cls_scores, bbox_preds)
 
         return pred_results, targets_results
 
-    def forward_test(self, imgs, img_metas, **kwargs):
-        """
-        Args:
-            imgs (List[Tensor]): the outer list indicates test-time
-                augmentations and inner Tensor should have a shape NxCxHxW,
-                which contains all images in the batch.
-            img_meta (List[List[dict]]): the outer list indicates test-time
-                augs (multiscale, flip, etc.) and the inner list indicates
-                images in a batch
-        """
-        for var, name in [(imgs, 'imgs'), (img_metas, 'img_metas')]:
-            if not isinstance(var, list):
-                raise TypeError('{} must be a list, but got {}'.format(
-                    name, type(var)))
+    def forward_test(self, img, img_metas, num_classes):
+        x = self.extract_feat(img)
 
-        num_augs = len(imgs)
-        if num_augs != len(img_metas):
-            raise ValueError(
-                'num of augmentations ({}) != num of image meta ({})'.format(
-                    len(imgs), len(img_metas)))
-        # TODO: remove the restriction of imgs_per_gpu == 1 when prepared
-        imgs_per_gpu = imgs[0].size(0)
-        assert imgs_per_gpu == 1
+        # cls_scores (list of levels, default len is 5 (p3-p7))
+        # cls_score (each level, shape: [batch(imgs), num_classes * anchors, h, w])
+        # similarly， bbox_preds
+        cls_scores, bbox_preds = self.head(x)
 
-        if num_augs == 1:
-            return self.simple_test(imgs[0], img_metas[0], **kwargs)
-        else:
-            return self.aug_test(imgs, img_metas, **kwargs)
+        featmap_sizes = [featmap.size()[-2:] for featmap in cls_scores]
 
-    # def simple_test(self, img, img_meta, rescale=False):
-    #     x = self.extract_feat(img)
-    #     outs = self.head(x)
-    #     bbox_inputs = outs + (img_meta, self.test_cfg, rescale)
-    #     bbox_list = self.head.get_bboxes(*bbox_inputs)
-    #     bbox_results = [
-    #         bbox2result(det_bboxes, det_labels, self.head.num_classes)
-    #         for det_bboxes, det_labels in bbox_list
-    #     ]
-    #     return bbox_results[0]
+        # anchor_list (list of list, [img[level, ...], ...])
+        anchor_list, valid_flag_list = self.anchor.get_anchors(
+            featmap_sizes,
+            img_metas,
+            device=cls_scores[0].device
+        )
+
+        bbox_list = self.anchor.get_bboxes(
+            anchor_list,
+            valid_flag_list,
+            img_metas,
+            cls_scores,
+            bbox_preds,
+            num_classes
+        )
+
+        bbox_results = [
+            bbox2result(det_bboxes, det_labels, num_classes)
+            for det_bboxes, det_labels in bbox_list
+        ]
+
+        return bbox_results
 
     def forward(self, img, img_meta, test_mode=False, **kwargs):
         """

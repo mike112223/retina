@@ -20,6 +20,8 @@ def assemble(cfg_fp, checkpoint='', test_mode=False):
     print('build config!')
     cfg = Config.fromfile(cfg_fp)
 
+    os.environ['CUDA_VISIBLE_DEVICES'] = cfg['gpu_id']
+
     # 2. data
     # 2.1 dataset
     print('build data!')

@@ -11,9 +11,11 @@ Pytorch implementation of [RetinaNet](https://arxiv.org/pdf/1708.02002.pdf)
 python tools/trainval.py configs/retinanet.py
 ```
 
-## Validation
+## Testing
 
-Not implemented yet.
+```shell
+python tools/test.py configs/retinanet.py
+```
 
 ## Credit
 - [mmdetection](https://github.com/open-mmlab/mmdetection)

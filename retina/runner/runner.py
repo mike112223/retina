@@ -1,10 +1,10 @@
 import torch
 import os.path as osp
-import torch.nn.functional as F
 import numpy as np
 from collections.abc import Iterable
 
 from retina.utils.checkpoint import load_checkpoint, save_checkpoint
+from retina.evaluation import eval_map
 
 from .registry import RUNNERS
 
@@ -67,25 +67,13 @@ class Runner(object):
         if not iter_based:
             self.lr_scheduler.step()
 
-    def validate_epoch(self):
-        print('Epoch %d, Start validating' % self.epoch)
-        self.metric.reset()
-        for img, label in self.loader['val']:
-            self.validate_batch(img, label)
-
-    def test_epoch(self):
-        print('Start testing')
-        print('test info: %s' % self.test_cfg)
-        self.metric.reset()
-        for img, label in self.loader['val']:
-            self.test_batch(img, label)
-
     def train_batch(self, batch):
         self.model.train()
 
         self.optim.zero_grad()
 
         img_metas = batch['img_meta']
+        # print([_['filename'] for _ in img_metas])
         imgs = batch['img']
         gt_bboxes = batch['gt_bboxes']
         gt_labels = batch['gt_labels']
@@ -117,60 +105,88 @@ class Runner(object):
             print(
                 'Train, Epoch %d, Iter %d, LR %s, cls loss %.4f, reg loss %.4f, total loss: %.4f' %
                 (self.epoch, self.iter, self.lr, sum(cls_losses).item(),
-                 sum(reg_losses).item(), sum(cls_losses).item() + sum(reg_losses).item()))
+                 sum(reg_losses).item(), losses.item()))
 
-    def validate_batch(self, img, label):
+    def val_epoch(self):
+        print('Epoch %d, Start validating' % self.epoch)
+        for batch in self.loader['val']:
+            self.val_batch(batch)
+
+    def val_batch(self, batch):
         self.model.eval()
         with torch.no_grad():
+
+            img_metas = batch['img_meta']
+            # print([_['filename'] for _ in img_metas])
+            imgs = batch['img']
+            gt_bboxes = batch['gt_bboxes']
+            gt_labels = batch['gt_labels']
+            gt_bboxes_ignore = batch.get('gt_bboxes_ignore', None)
+
             if self.gpu:
-                img = img.cuda()
-                label = label.cuda()
+                imgs = imgs.cuda()
+                gt_labels = [_.cuda() for _ in gt_labels]
+                gt_bboxes = [_.cuda() for _ in gt_bboxes]
+                if gt_bboxes_ignore is not None:
+                    gt_bboxes_ignore = gt_bboxes_ignore.cuda()
 
-            pred = self.model(img)
+            preds_results, targets_results = self.model(
+                imgs,
+                img_metas,
+                self.test_mode,
+                gt_bboxes=gt_bboxes,
+                gt_labels=gt_labels,
+                gt_bboxes_ignore=gt_bboxes_ignore
+            )
 
-            prob = pred.softmax(dim=1)
-            _, pred_label = torch.max(prob, dim=1)
-            self.metric.add(pred_label.cpu().numpy(), label.cpu().numpy())
-            miou, ious = self.metric.miou()
-            print('Validate, mIoU %.4f, IoUs %s' % (miou, ious))
+            reg_losses, cls_losses = self.criterion(preds_results, targets_results)
+            losses = sum(reg_losses + cls_losses)
 
-    def test_batch(self, img, label):
+            if self.iter != 0 and self.iter % 10 == 0:
+                print(
+                    'Val, Epoch %d, Iter %d, LR %s, cls loss %.4f, reg loss %.4f, total loss: %.4f' %
+                    (self.epoch, self.iter, self.lr, sum(cls_losses).item(),
+                     sum(reg_losses).item(), losses.item()))
+
+    def test_epoch(self):
+        print('Epoch %d, Start testing' % self.epoch)
+
+        results = []
+        gt_bboxes = []
+        gt_labels = []
+
+        for batch in self.loader['test']:
+            results.append(self.test_batch(batch))
+            gt_bboxes.append(batch['gt_bboxes'])
+            gt_labels.append(batch['gt_labels'])
+
+        eval_map(results,
+                 gt_bboxes,
+                 gt_labels,
+                 gt_ignore=None,
+                 scale_ranges=None,
+                 iou_thr=0.5,
+                 dataset=self.loader.dataset,
+                 print_summary=True)
+
+    def test_batch(self, batch):
         self.model.eval()
         with torch.no_grad():
+
+            img_metas = batch['img_meta']
+            # print([_['filename'] for _ in img_metas])
+            imgs = batch['img']
+
             if self.gpu:
-                img = img.cuda()
-                label = label.cuda()
+                imgs = imgs.cuda()
 
-            if self.test_cfg:
-                scales = self.test_cfg.get('scales', [1.0])
-                flip = self.test_cfg.get('flip', False)
-                biases = self.test_cfg.get('bias', [0.0])
-            else:
-                scales = [1.0]
-                flip = False
-                biases = [0.0]
+            bbox_results = self.model(
+                imgs,
+                img_metas,
+                self.test_mode,
+            )
 
-            assert len(scales) == len(biases)
-
-            n, c, h, w = img.size()
-            probs = []
-            for scale, bias in zip(scales, biases):
-                new_h, new_w = int(h*scale + bias), int(w*scale+bias)
-                new_img = F.interpolate(img, size=(new_h, new_w), mode='bilinear', align_corners=True)
-                prob = self.model(new_img).softmax(dim=1)
-                probs.append(prob)
-
-                if flip:
-                    flip_img = new_img.flip(3)
-                    flip_prob = self.model(flip_img).softmax(dim=1)
-                    prob = flip_prob.flip(3)
-                    probs.append(prob)
-            prob = torch.stack(probs, dim=0).mean(dim=0)
-
-            _, pred_label = torch.max(prob, dim=1)
-            self.metric.add(pred_label.cpu().numpy(), label.cpu().numpy())
-            miou, ious = self.metric.miou()
-            print('Test, mIoU %.4f, IoUs %s' % (miou, ious))
+        return bbox_results
 
     def save_checkpoint(self,
                         out_dir,
@@ -229,25 +245,3 @@ class Runner(object):
     def iter(self, val):
         """int: Current epoch."""
         self.lr_scheduler.last_iter = val
-
-    def resume(self,
-               checkpoint,
-               resume_optimizer=False,
-               resume_lr=True,
-               resume_epoch=True,
-               map_location='default'):
-        if map_location == 'default':
-            device_id = torch.cuda.current_device()
-            checkpoint = self.load_checkpoint(
-                checkpoint,
-                map_location=lambda storage, loc: storage.cuda(device_id))
-        else:
-            checkpoint = self.load_checkpoint(checkpoint, map_location=map_location)
-        if 'optimizer' in checkpoint and resume_optimizer:
-            self.optim.load_state_dict(checkpoint['optimizer'])
-        if resume_epoch:
-            self.epoch = checkpoint['meta']['epoch']
-            self.start_epoch = self.epoch
-            self.iter = checkpoint['meta']['iter']
-        if resume_lr:
-            self.lr = checkpoint['meta']['lr']
